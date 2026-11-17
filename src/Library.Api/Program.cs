@@ -1,41 +1,76 @@
-var builder = WebApplication.CreateBuilder(args);
+using Library.Contracts.Books;
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
+var builder = WebApplication.CreateBuilder(args);
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+// Du lieu sach luu trong bo nho
+var books = new List<BookDto>
 {
-    app.MapOpenApi();
-}
-
-app.UseHttpsRedirection();
-
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
+    new BookDto(1, "Lap trinh C#", "Nguyen Van A", "ISBN001", 2024),
+    new BookDto(2, "Lap trinh Java", "Tran Van B", "ISBN002", 2023),
+    new BookDto(3, "Co so du lieu", "Le Van C", "ISBN003", 2022)
 };
 
-app.MapGet("/weatherforecast", () =>
+// API 1: Lay danh sach sach
+app.MapGet("/api/books", () =>
 {
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
+    return Results.Ok(books);
+});
+
+// API 2: Lay thong tin sach theo ID
+app.MapGet("/api/books/{id:int}", (int id) =>
+{
+    var book = books.FirstOrDefault(b => b.Id == id);
+
+    if (book == null)
+    {
+        return Results.NotFound(new
+        {
+            message = "Khong tim thay sach."
+        });
+    }
+
+    return Results.Ok(book);
+});
+
+// API 3: Them sach moi
+app.MapPost("/api/books", (CreateBookRequest request) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Title) ||
+        string.IsNullOrWhiteSpace(request.Author) ||
+        string.IsNullOrWhiteSpace(request.Isbn) ||
+        request.PublishedYear <= 0)
+    {
+        return Results.BadRequest(new
+        {
+            message = "Thong tin sach khong hop le."
+        });
+    }
+
+    if (books.Any(b => b.Isbn == request.Isbn))
+    {
+        return Results.BadRequest(new
+        {
+            message = "ISBN da ton tai."
+        });
+    }
+
+    int newId = books.Count == 0
+        ? 1
+        : books.Max(b => b.Id) + 1;
+
+    var newBook = new BookDto(
+        newId,
+        request.Title,
+        request.Author,
+        request.Isbn,
+        request.PublishedYear
+    );
+
+    books.Add(newBook);
+
+    return Results.Created($"/api/books/{newId}", newBook);
+});
 
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
