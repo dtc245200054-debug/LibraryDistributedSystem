@@ -1,167 +1,143 @@
-﻿using System.Net;
+﻿
+using System.Net;
 using System.Net.Http.Json;
 using Library.Contracts.Books;
+using Library.Contracts.Reservations;
+using Microsoft.AspNetCore.SignalR.Client;
 
-using var client = new HttpClient
+var apiBaseUrl = args.Length > 0
+    ? args[0].TrimEnd('/')
+    : "http://localhost:5000";
+
+using var http = new HttpClient
 {
-    BaseAddress = new Uri("http://localhost:5000"),
+    BaseAddress = new Uri(apiBaseUrl),
     Timeout = TimeSpan.FromSeconds(10)
 };
 
 try
 {
-    // 1. Kiem tra trang thai API
-    Console.WriteLine("===== KIEM TRA API =====");
+    // 1. Ket noi SignalR
+    await using var connection = new HubConnectionBuilder()
+        .WithUrl($"{apiBaseUrl}/hubs/reservations")
+        .WithAutomaticReconnect()
+        .Build();
 
-    var healthResponse = await client.GetAsync("/");
+    var completedNotification = new TaskCompletionSource<bool>();
 
-    Console.WriteLine(
-        $"HTTP Status: {(int)healthResponse.StatusCode}"
+    // 2. Dang ky nhan thong bao
+    connection.On<ReservationStatusMessage>(
+        "ReservationStatusChanged",
+        message =>
+        {
+            Console.WriteLine();
+            Console.WriteLine("===== THONG BAO SIGNALR =====");
+            Console.WriteLine($"Ma yeu cau: {message.ReservationId}");
+            Console.WriteLine($"Trang thai: {message.Status}");
+            Console.WriteLine($"Thoi gian: {message.UpdatedAt:HH:mm:ss}");
+
+            if (message.Status == "ready")
+            {
+                completedNotification.TrySetResult(true);
+            }
+        }
     );
 
-    // 2. Lay danh sach sach
+    // 3. Bat dau ket noi
+    await connection.StartAsync();
+
+    Console.WriteLine("Da ket noi SignalR thanh cong.");
+
+    // 4. Lay danh sach sach
     Console.WriteLine();
     Console.WriteLine("===== DANH SACH SACH =====");
 
-    var listResponse = await client.GetAsync("/api/books");
-
-    Console.WriteLine(
-        $"HTTP Status: {(int)listResponse.StatusCode}"
+    var books = await http.GetFromJsonAsync<List<BookDto>>(
+        "/api/books"
     );
 
-    if (listResponse.IsSuccessStatusCode)
+    if (books is null || books.Count == 0)
     {
-        var books = await listResponse.Content
-            .ReadFromJsonAsync<List<BookDto>>();
-
-        if (books != null)
-        {
-            foreach (var book in books)
-            {
-                Console.WriteLine(
-                    $"{book.Id} - {book.Title} - {book.Author}"
-                );
-            }
-        }
+        Console.WriteLine("Khong co sach.");
+        return;
     }
 
-    // 3. Tim kiem sach bang query string
-    Console.WriteLine();
-    Console.WriteLine("===== TIM KIEM SACH JAVA =====");
-
-    var searchResponse = await client.GetAsync(
-        "/api/books?keyword=Java"
-    );
-
-    var searchBooks = await searchResponse.Content
-        .ReadFromJsonAsync<List<BookDto>>();
-
-    if (searchBooks != null)
+    foreach (var book in books)
     {
-        foreach (var book in searchBooks)
-        {
-            Console.WriteLine(book.Title);
-        }
-    }
-
-    // 4. Them sach moi
-    Console.WriteLine();
-    Console.WriteLine("===== THEM SACH MOI =====");
-
-    var newBook = new CreateBookRequest(
-        "Lap trinh ASP.NET Core",
-        "Tran Phuong Nam",
-        "ISBN004",
-        2026
-    );
-
-    var createResponse = await client.PostAsJsonAsync(
-        "/api/books",
-        newBook
-    );
-
-    Console.WriteLine(
-        $"HTTP Status: {(int)createResponse.StatusCode}"
-    );
-
-    if (createResponse.StatusCode == HttpStatusCode.Created)
-    {
-        var createdBook = await createResponse.Content
-            .ReadFromJsonAsync<BookDto>();
-
         Console.WriteLine(
-            $"Da them sach: {createdBook?.Title}"
-        );
-
-        Console.WriteLine(
-            $"Location: {createResponse.Headers.Location}"
-        );
-    }
-    else
-    {
-        var error = await createResponse.Content
-            .ReadFromJsonAsync<ApiError>();
-
-        Console.WriteLine(
-            $"Ma loi: {error?.Code}"
-        );
-
-        Console.WriteLine(
-            $"Thong bao: {error?.Message}"
+            $"{book.Id} - {book.Title} - {book.Author}"
         );
     }
 
-    // 5. Thu lay sach khong ton tai
+    // 5. Chon sach dau tien
+    var selectedBook = books.First();
+
     Console.WriteLine();
-    Console.WriteLine("===== KIEM TRA LOI 404 =====");
+    Console.WriteLine($"Dang dat muon sach: {selectedBook.Title}");
 
-    var missingResponse = await client.GetAsync("/api/books/99");
-
-    Console.WriteLine(
-        $"HTTP Status: {(int)missingResponse.StatusCode}"
+    // 6. Tao yeu cau dat muon bang REST
+    var request = new CreateReservationRequest(
+        "DTC245200054"
     );
 
-    var missingError = await missingResponse.Content
-        .ReadFromJsonAsync<ApiError>();
-
-    Console.WriteLine(
-        $"Ma loi: {missingError?.Code}"
+    var response = await http.PostAsJsonAsync(
+        $"/api/books/{selectedBook.Id}/reservations",
+        request
     );
 
-    Console.WriteLine(
-        $"Thong bao: {missingError?.Message}"
-    );
+    Console.WriteLine($"HTTP Status: {(int)response.StatusCode}");
 
-    // 6. Thu gui du lieu khong hop le
+    if (response.StatusCode != HttpStatusCode.Created)
+    {
+        Console.WriteLine("Khong tao duoc yeu cau dat muon.");
+        Console.WriteLine(await response.Content.ReadAsStringAsync());
+        return;
+    }
+
+    var createdReservation =
+        await response.Content.ReadFromJsonAsync<ReservationDto>();
+
+    if (createdReservation is null)
+    {
+        Console.WriteLine("Khong doc duoc thong tin yeu cau.");
+        return;
+    }
+
     Console.WriteLine();
-    Console.WriteLine("===== KIEM TRA LOI 400 =====");
+    Console.WriteLine("===== TAO YEU CAU THANH CONG =====");
+    Console.WriteLine($"Ma yeu cau: {createdReservation.Id}");
+    Console.WriteLine($"Trang thai ban dau: {createdReservation.Status}");
 
-    var invalidBook = new CreateBookRequest(
-        "",
-        "Nguyen Van A",
-        "ISBN005",
-        2026
+    // 7. Dang ky theo doi yeu cau
+    await connection.InvokeAsync(
+        "WatchReservation",
+        createdReservation.Id.ToString()
     );
 
-    var invalidResponse = await client.PostAsJsonAsync(
-        "/api/books",
-        invalidBook
+    Console.WriteLine();
+    Console.WriteLine("Dang cho thong bao tu may chu...");
+
+    // 8. Cho thong bao ready
+    var completed = await Task.WhenAny(
+        completedNotification.Task,
+        Task.Delay(TimeSpan.FromSeconds(10))
     );
 
-    Console.WriteLine(
-        $"HTTP Status: {(int)invalidResponse.StatusCode}"
-    );
+    if (completed != completedNotification.Task)
+    {
+        Console.WriteLine("Qua thoi gian cho thong bao.");
+    }
 
-    var invalidError = await invalidResponse.Content
-        .ReadFromJsonAsync<ApiError>();
+    // 9. Doc lai trang thai bang REST
+    Console.WriteLine();
+    Console.WriteLine("===== KIEM TRA TRANG THAI CUOI =====");
 
-    Console.WriteLine(
-        $"Ma loi: {invalidError?.Code}"
-    );
+    var latestReservation =
+        await http.GetFromJsonAsync<ReservationDto>(
+            $"/api/reservations/{createdReservation.Id}"
+        );
 
-    Console.WriteLine(
-        $"Thong bao: {invalidError?.Message}"
-    );
+    Console.WriteLine($"Trang thai cuoi: {latestReservation?.Status}");
 }
 catch (HttpRequestException ex)
 {
@@ -171,4 +147,9 @@ catch (HttpRequestException ex)
 catch (TaskCanceledException)
 {
     Console.WriteLine("Yeu cau da qua thoi gian cho.");
+}
+catch (Exception ex)
+{
+    Console.WriteLine("Co loi xay ra:");
+    Console.WriteLine(ex.Message);
 }

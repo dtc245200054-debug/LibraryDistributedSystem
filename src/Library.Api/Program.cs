@@ -1,9 +1,15 @@
+
 using Library.Contracts.Books;
+using Library.Contracts.Reservations;
+using Library.Api.Hubs;
+using Microsoft.AspNetCore.SignalR;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddSignalR();
+
 var app = builder.Build();
 
-// Du lieu sach mau luu trong bo nho
 var books = new List<BookDto>
 {
     new(1, "Lap trinh C#", "Nguyen Van A", "ISBN001", 2024),
@@ -11,7 +17,10 @@ var books = new List<BookDto>
     new(3, "Co so du lieu", "Le Van C", "ISBN003", 2022)
 };
 
-// 1. Health Check: kiem tra trang thai dich vu
+var reservations = new List<ReservationDto>();
+var reservationsLock = new object();
+
+// 1. Kiem tra API
 app.MapGet("/", () =>
 {
     return Results.Ok(new
@@ -21,7 +30,7 @@ app.MapGet("/", () =>
     });
 });
 
-// 2. GET: Lay danh sach sach, ho tro tim kiem qua query string
+// 2. Lay danh sach sach
 app.MapGet("/api/books", (string? keyword) =>
 {
     var result = books.AsEnumerable();
@@ -36,7 +45,7 @@ app.MapGet("/api/books", (string? keyword) =>
     return Results.Ok(result.ToList());
 });
 
-// 3. GET: Xem chi tiet sach theo route parameter
+// 3. Xem chi tiet sach
 app.MapGet("/api/books/{id:int}", (int id) =>
 {
     var book = books.FirstOrDefault(b => b.Id == id);
@@ -51,44 +60,161 @@ app.MapGet("/api/books/{id:int}", (int id) =>
     return Results.Ok(book);
 });
 
-// 4. POST: Them sach moi tu request body
-app.MapPost("/api/books", (CreateBookRequest request) =>
+// 4. Xem yeu cau dat muon
+app.MapGet(
+    "/api/reservations/{reservationId:guid}",
+    IResult (Guid reservationId) =>
 {
-    if (string.IsNullOrWhiteSpace(request.Title) ||
-        string.IsNullOrWhiteSpace(request.Author) ||
-        string.IsNullOrWhiteSpace(request.Isbn) ||
-        request.PublishedYear <= 0)
+    ReservationDto? reservation;
+
+    lock (reservationsLock)
     {
-        return Results.BadRequest(
+        reservation = reservations.FirstOrDefault(
+            item => item.Id == reservationId
+        );
+    }
+
+    if (reservation is null)
+    {
+        return Results.NotFound(
             new ApiError(
-                "INVALID_BOOK",
-                "Ten sach, tac gia, ISBN khong duoc de trong va nam xuat ban phai lon hon 0."
+                "RESERVATION_NOT_FOUND",
+                "Khong tim thay yeu cau dat muon."
             )
         );
     }
 
-    if (books.Any(b => b.Isbn.Equals(
-        request.Isbn.Trim(),
-        StringComparison.OrdinalIgnoreCase)))
+    return Results.Ok(reservation);
+});
+
+// 5. Tao yeu cau dat muon
+app.MapPost(
+    "/api/books/{bookId:int}/reservations",
+    IResult (
+        int bookId,
+        CreateReservationRequest request,
+        IHubContext<ReservationHub> hubContext
+    ) =>
+{
+    var book = books.FirstOrDefault(b => b.Id == bookId);
+
+    if (book is null)
     {
-        return Results.BadRequest(
-            new ApiError("DUPLICATE_ISBN", "ISBN da ton tai.")
+        return Results.NotFound(
+            new ApiError("BOOK_NOT_FOUND", "Khong tim thay sach.")
         );
     }
 
-    int newId = books.Count == 0 ? 1 : books.Max(b => b.Id) + 1;
+    if (string.IsNullOrWhiteSpace(request.StudentCode))
+    {
+        return Results.BadRequest(
+            new ApiError(
+                "INVALID_RESERVATION",
+                "Ma sinh vien khong duoc de trong."
+            )
+        );
+    }
 
-    var newBook = new BookDto(
-        newId,
-        request.Title.Trim(),
-        request.Author.Trim(),
-        request.Isbn.Trim(),
-        request.PublishedYear
+    var reservation = new ReservationDto(
+        Guid.NewGuid(),
+        bookId,
+        request.StudentCode.Trim(),
+        "received",
+        DateTimeOffset.UtcNow,
+        DateTimeOffset.UtcNow
     );
 
-    books.Add(newBook);
+    lock (reservationsLock)
+    {
+        reservations.Add(reservation);
+    }
 
-    return Results.Created($"/api/books/{newId}", newBook);
+    _ = SimulateReservationAsync(
+        reservation.Id,
+        reservations,
+        reservationsLock,
+        hubContext
+    );
+
+    return Results.Created(
+        $"/api/reservations/{reservation.Id}",
+        reservation
+    );
 });
 
+// 6. Dang ky SignalR Hub
+app.MapHub<ReservationHub>("/hubs/reservations");
+
 app.Run();
+
+// Mo phong xu ly yeu cau
+static async Task SimulateReservationAsync(
+    Guid reservationId,
+    List<ReservationDto> reservations,
+    object reservationsLock,
+    IHubContext<ReservationHub> hubContext)
+{
+    await Task.Delay(TimeSpan.FromSeconds(1));
+
+    await UpdateReservationStatusAsync(
+        reservationId,
+        "processing",
+        reservations,
+        reservationsLock,
+        hubContext
+    );
+
+    await Task.Delay(TimeSpan.FromSeconds(2));
+
+    await UpdateReservationStatusAsync(
+        reservationId,
+        "ready",
+        reservations,
+        reservationsLock,
+        hubContext
+    );
+}
+
+// Cap nhat trang thai va gui thong bao
+static async Task UpdateReservationStatusAsync(
+    Guid reservationId,
+    string status,
+    List<ReservationDto> reservations,
+    object reservationsLock,
+    IHubContext<ReservationHub> hubContext)
+{
+    ReservationDto? updatedReservation = null;
+
+    lock (reservationsLock)
+    {
+        var index = reservations.FindIndex(
+            item => item.Id == reservationId
+        );
+
+        if (index >= 0)
+        {
+            updatedReservation = reservations[index] with
+            {
+                Status = status,
+                UpdatedAt = DateTimeOffset.UtcNow
+            };
+
+            reservations[index] = updatedReservation;
+        }
+    }
+
+    if (updatedReservation is null)
+    {
+        return;
+    }
+
+    var message = new ReservationStatusMessage(
+        updatedReservation.Id,
+        updatedReservation.Status,
+        updatedReservation.UpdatedAt
+    );
+
+    await hubContext.Clients
+        .Group(ReservationGroups.ForReservation(reservationId))
+        .SendAsync("ReservationStatusChanged", message);
+}
